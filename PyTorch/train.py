@@ -94,3 +94,57 @@ def remove_distant_agents(x, indices=None):
     x = x[indices[:, 0], indices[:, 1], :]
     x = x.reshape(n, config.TOP_K, c)
     return x, indices
+
+#single epoch loop
+def train_epoch(model_cbf, model_action, dataloader, optimizer_cbf, optimizer_action, device):
+    model_cbf.train()
+    model_action.train()
+    total_loss = 0
+    for states, goals in dataloader:
+        states, goals = states.to(device), goals.to(device)
+
+        optimizer_cbf.zero_grad()
+        optimizer_action.zero_grad()
+
+        h, mask = model_cbf(states, config.DIST_MIN_THRES)
+        actions = model_action(states, goals)
+
+        loss = core.loss_functions(h, actions, states, goals, mask)  # Custom loss computation
+        loss.backward()
+
+        optimizer_cbf.step()
+        optimizer_action.step()
+
+        total_loss += loss.item()
+
+    avg_loss = total_loss / len(dataloader)
+    return avg_loss
+    
+#main
+def main():
+    args = parse_args()
+
+    if args.gpu and torch.cuda.is_available():
+        torch.cuda.set_device(int(args.gpu))
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model_cbf = NetworkCBF().to(device)
+    model_action = NetworkAction().to(device)
+    
+    optimizer_cbf = optim.Adam(model_cbf.parameters(), lr=config.LEARNING_RATE)
+    optimizer_action = optim.Adam(model_action.parameters(), lr=config.LEARNING_RATE)
+
+    for epoch in range(config.TRAIN_STEPS):
+        avg_loss = train_epoch(model_cbf, model_action, dataloader, optimizer_cbf, optimizer_action, device)
+        print(f'Epoch [{epoch+1}/{config.TRAIN_STEPS}], Loss: {avg_loss:.4f}')
+
+        if (epoch + 1) % config.SAVE_STEPS == 0:
+            torch.save({
+                'model_cbf_state_dict': model_cbf.state_dict(),
+                'model_action_state_dict': model_action.state_dict(),
+            }, os.path.join('models', f'model_epoch_{epoch+1}.pth'))
+            print(f'Models saved at epoch {epoch+1}')
+            
+if __name__ == '__main__':
+    main()
+
