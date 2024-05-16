@@ -118,6 +118,7 @@ def train_epoch(model_cbf, model_action, dataloader, optimizer_cbf, optimizer_ac
         actions = model_action(states, goals)
 
         loss = core.loss_functions(h, actions, states, goals, mask)  # Custom loss computation
+        #yaha pr dono neural nets ke liye loss functions same honge ya diff?
         loss.backward()
 
         optimizer_cbf.step()
