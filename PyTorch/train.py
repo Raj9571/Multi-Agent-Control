@@ -5,7 +5,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
-
+import core
+import config
 
 class AgentDataset(Dataset):
     def __init__(self, num_agents, dist_min_thres, num_samples=1000):
@@ -82,8 +83,8 @@ def main():
         torch.cuda.set_device(int(args.gpu))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model_cbf = NetworkCBF().to(device)
-    model_action = NetworkAction().to(device)
+    model_cbf = core.NetworkCBF().to(device)
+    model_action = core.NetworkAction().to(device)
     
     optimizer_cbf = optim.Adam(model_cbf.parameters(), lr=config.LEARNING_RATE)
     optimizer_action = optim.Adam(model_action.parameters(), lr=config.LEARNING_RATE)
