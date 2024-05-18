@@ -133,8 +133,32 @@ def train_epoch(model_cbf, model_action, dataloader, optimizer_cbf, optimizer_ac
 
         h, mask = model_cbf(states, config.DIST_MIN_THRES)
         actions = model_action(states, goals)
+        loss_action = core.loss_actions(
+        s=s, g=g, a=a, r=config.DIST_MIN_THRES, ttc=config.TIME_TO_COLLISION)
 
-        loss = core.loss_functions(h, actions, states, goals, mask)  # Custom loss computation
+        x = torch.unsqueeze(s, 1) - torch.unsqueeze(s, 0)
+        
+        (loss_dang_deriv, loss_safe_deriv, acc_dang_deriv, acc_safe_deriv
+        ) = core.loss_derivatives(s=states, a=actions, h=h, x=x, r=config.DIST_MIN_THRES, 
+        indices=indices, ttc=config.TIME_TO_COLLISION, alpha=config.ALPHA_CBF)
+
+        (loss_dang, loss_safe, acc_dang, acc_safe) = core.loss_barrier(
+        h=h, s=states, r=config.DIST_MIN_THRES, ttc=config.TIME_TO_COLLISION, indices=indices)
+
+        loss_list = [2 * loss_dang, loss_safe, 2 * loss_dang_deriv, loss_safe_deriv, 0.01 * loss_action]
+        acc_list = [acc_dang, acc_safe, acc_dang_deriv, acc_safe_deriv]
+    
+        WEIGHT_DECAY = config.WEIGHT_DECAY
+
+        # Getting the list of trainable parameters
+        params = [p for p in model.parameters() if p.requires_grad]
+        
+        # Calculating the weight decay loss
+        weight_loss = [WEIGHT_DECAY * (param.pow(2).sum()) for param in params]
+        
+        # Calculating the total loss
+        loss = 10 * (sum(loss_list) + sum(weight_loss))
+        
         #Need to define a different function for loss_fucntions, as there are 3 losses we need to calculate
         loss.backward()
 
