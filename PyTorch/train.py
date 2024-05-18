@@ -6,6 +6,23 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 
+
+class AgentDataset(Dataset):
+    def __init__(self, num_agents, dist_min_thres, num_samples=1000):
+        super(AgentDataset, self).__init__()
+        self.num_agents = num_agents
+        self.dist_min_thres = dist_min_thres
+        self.num_samples = num_samples
+        # Generate data upfront for simplicity; consider generating on-the-fly for large datasets
+        self.data = [core.generate_data(num_agents, dist_min_thres) for _ in range(num_samples)]
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        states, goals = self.data[idx]
+        return torch.tensor(states, dtype=torch.float32), torch.tensor(goals, dtype=torch.float32)
+        
 #class of CBF
 class NetworkCBF(nn.Module):
     def __init__(self, obs_radius):
@@ -142,6 +159,9 @@ def main():
     
     optimizer_cbf = optim.Adam(model_cbf.parameters(), lr=config.LEARNING_RATE)
     optimizer_action = optim.Adam(model_action.parameters(), lr=config.LEARNING_RATE)
+
+    dataset = AgentDataset(args.num_agents, config.DIST_MIN_THRES, num_samples=1000)
+    dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
 
     for epoch in range(config.TRAIN_STEPS):
         avg_loss = train_epoch(model_cbf, model_action, dataloader, optimizer_cbf, optimizer_action, device)
