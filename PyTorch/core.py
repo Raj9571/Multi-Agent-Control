@@ -71,6 +71,7 @@ def generate_data(num_agents, dist_min_thres):
     return states, goals
 
 
+#class of CBF
 class NetworkCBF(nn.Module):
     def __init__(self, obs_radius):
         super(NetworkCBF, self).__init__()
@@ -98,7 +99,7 @@ class NetworkCBF(nn.Module):
          mask = (dist <= self.obs_radius).float()
 
          # Pass through convolutional layers
-         x = F.relu(self.conv1(x))
+         x = F.relu(self.conv1(x.permute(0,2,1))
          x = F.relu(self.conv2(x))
          x = F.relu(self.conv3(x))
          x = self.conv4(x)
@@ -107,15 +108,14 @@ class NetworkCBF(nn.Module):
 
          return x, mask
 
-network_cbf = NetworkCBF(obs_radius=config.OBS_RADIUS)
-
+#class of action
 class NetworkAction(nn.Module):
     def __init__(self, top_k, obs_radius=1.0):
         super(NetworkAction, self).__init__()
         self.top_k = top_k
         self.obs_radius = obs_radius
         # Convolutional layers
-        self.conv1 = nn.Conv1d(in_channels=4, out_channels=64, kernel_size=1)
+        self.conv1 = nn.Conv1d(in_channels=5, out_channels=64, kernel_size=1)
         self.conv2 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=1)
         # Fully connected layers
         self.fc1 = nn.Linear(in_features=128, out_features=64)
@@ -125,16 +125,16 @@ class NetworkAction(nn.Module):
 
     def forward(self, s, g):
         batch_size, seq_len, _ = s.shape
-        eye = torch.eye(seq_len, device=s.device).expand(batch_size, -1, -1).unsqueeze(1)
-        x = s.unsqueeze(2) - s.unsqueeze(1)  # NxNx4
-        x = torch.cat([x, eye], dim=3)  # Add eye matrix for identifying the agent itself
-
+        #eye = torch.eye(seq_len, device=s.device).expand(batch_size, -1, -1).unsqueeze(1)
+        x = torch.unsqueeze(s, 1) - torch.unsqueeze(s, 0)  # NxNx4
+        x = torch.cat([x, torch.eye(x.size(0), device=x.device).unsqueeze(2)], dim=2)
+    
         # Filter out distant agents and adjust input for convolution layers
         x, _ = self.remove_distant_agents(x)
-        x = x.transpose(1, 2)  # BxCxN
+        #x = x.transpose(1, 2)  # BxCxN
         
         # Apply convolution layers
-        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv1(x.permute(0,2,1))
         x = F.relu(self.conv2(x))
         # Apply global max pooling
         x, _ = torch.max(x, dim=2)
@@ -151,19 +151,22 @@ class NetworkAction(nn.Module):
         x = 2.0 * torch.sigmoid(x) - 1.0
         return x
 
-    def remove_distant_agents(self, x):
-        batch_size, seq_len, _, _ = x.shape
-        dists = torch.norm(x[..., :2], dim=3)  # Compute distances based on position differences
-        dists, indices = dists.topk(self.top_k, dim=2, largest=False)  # Find top_k closest agents
-
-        # Gather the top_k entries for each element in the batch
-        x_top_k = torch.gather(x, 2, indices.unsqueeze(-1).expand(-1, -1, -1, x.size(3)))
-
-        # Create a mask to identify top_k entries
-        mask = torch.zeros(batch_size, seq_len, device=x.device).scatter_(1, indices, 1).unsqueeze(2)
-
-        return x_top_k, mask
-
+def remove_distant_agents(x, indices=None):
+    n, _, c = x.size()
+    if n <= config.TOP_K:
+        return x, False
+    d_norm = torch.sqrt(torch.sum(torch.square(x[:, :, :2]) + 1e-6, dim=2))
+    if indices is not None:
+        x = x[indices]
+        return x, indices
+    _, indices = torch.topk(-d_norm, k = config.TOP_K, dim=1)
+    row_indices = torch.arange(indices.size(0), device=indices.device).unsqueeze(1).expand(-1, config.TOP_K)
+    row_indices = row_indices.reshape(-1, 1)
+    column_indices = indices.reshape(-1, 1)
+    indices = torch.cat([row_indices, column_indices], dim=1)
+    x = x[indices[:, 0], indices[:, 1], :]
+    x = x.reshape(n, config.TOP_K, c)
+    return x, indices
 
 def dynamics(s, a):
     """
