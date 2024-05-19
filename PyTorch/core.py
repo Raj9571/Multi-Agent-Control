@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import config
 
 
+
 def generate_obstacle_circle(center, radius, num=12):
     theta = np.linspace(0, np.pi*2, num=num, endpoint=False).reshape(-1, 1)
     unit_circle = np.concatenate([np.cos(theta), np.sin(theta)], axis=1)
@@ -73,75 +74,82 @@ def generate_data(num_agents, dist_min_thres):
 
 #class of CBF
 class NetworkCBF(nn.Module):
-    def __init__(self, obs_radius):
+    def __init__(self):
         super(NetworkCBF, self).__init__()
+        obs_radius = config.OBS_RADIUS
         self.obs_radius = obs_radius
         # Adjust in_channels to match the dimension after concatenation
-        self.conv1 = nn.Conv1d(in_channels=4, out_channels=64, kernel_size=1)
+        self.conv1 = nn.Conv1d(in_channels=6, out_channels=64, kernel_size=1)
         self.conv2 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=1)
         self.conv3 = nn.Conv1d(in_channels=128, out_channels=64, kernel_size=1)
         self.conv4 = nn.Conv1d(in_channels=64, out_channels=1, kernel_size=1)
 
     
     def forward(self, x, r):
-         # Calculate norm
-         d_norm = torch.sqrt(torch.sum(x[:, :, :2]**2 + 1e-4, dim=2))
-         # Identity matrix for self identification
-         eye = torch.eye(x.shape[0], device=x.device).unsqueeze(-1)  # Ensure correct dimension
-         # Concatenate additional features
-         x = torch.cat([x, eye, (d_norm.unsqueeze(-1) - r)], dim=-1)  # Use dim=-1 for last dimension
-    
-         # (Optional) Implement and apply remove_distant_agents logic here
-         # x = remove_distant_agents(x, k=self.top_k, device=x.device) if needed
-
-         # Ensure the distance calculation and masking logic align with your new tensor shape
-         dist = torch.sqrt(torch.sum(x[..., :2]**2 + 1e-4, dim=-1, keepdim=True))
-         mask = (dist <= self.obs_radius).float()
-
-         # Pass through convolutional layers
-         x = F.relu(self.conv1(x.permute(0,2,1))
-         x = F.relu(self.conv2(x))
-         x = F.relu(self.conv3(x))
-         x = self.conv4(x)
-         # Apply mask
-         x = x * mask
-
-         return x, mask
+        # Calculate norm
+        d_norm = torch.sqrt(torch.sum(torch.square(x[:, :, :2]) + 1e-4, dim=2))
+        # Identity matrix for self identification
+        eye = torch.eye(x.shape[0], device=x.device).unsqueeze(-1)  # Ensure correct dimension
+        # Concatenate additional features
+        
+        x = torch.cat([x, eye, (d_norm.unsqueeze(-1) - r)], dim=-1)
+        
+        x, _ = remove_distant_agents(x) #if needed
+        
+        # Ensure the distance calculation and masking logic align with your new tensor shape
+        dist = torch.sqrt(torch.sum(x[..., :2]**2 + 1e-4, dim=-1, keepdim=True))
+        mask = (dist <= self.obs_radius).float()
+        
+        # Pass through convolutional layers
+        
+        x = F.relu(self.conv1(x.permute(0,2,1)))
+        
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+        x = self.conv4(x)
+        
+        # Apply mask
+        x = x.permute(0,2,1) * mask
+        return x, mask
 
 #class of action
 class NetworkAction(nn.Module):
-    def __init__(self, top_k, obs_radius=1.0):
+    def __init__(self):
         super(NetworkAction, self).__init__()
-        self.top_k = top_k
-        self.obs_radius = obs_radius
+        self.top_k = config.TOP_K
+        self.obs_radius = config.OBS_RADIUS
         # Convolutional layers
         self.conv1 = nn.Conv1d(in_channels=5, out_channels=64, kernel_size=1)
         self.conv2 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=1)
         # Fully connected layers
-        self.fc1 = nn.Linear(in_features=128, out_features=64)
+        self.fc1 = nn.Linear(in_features=132, out_features=64)
         self.fc2 = nn.Linear(in_features=64, out_features=128)
         self.fc3 = nn.Linear(in_features=128, out_features=64)
         self.fc4 = nn.Linear(in_features=64, out_features=4)
 
     def forward(self, s, g):
-        batch_size, seq_len, _ = s.shape
+        batch_size, seq_len = s.shape
+
         #eye = torch.eye(seq_len, device=s.device).expand(batch_size, -1, -1).unsqueeze(1)
         x = torch.unsqueeze(s, 1) - torch.unsqueeze(s, 0)  # NxNx4
-        x = torch.cat([x, torch.eye(x.size(0), device=x.device).unsqueeze(2)], dim=2)
+        eye = torch.eye(x.size(0)).unsqueeze(2)  # Shape: (batch_size, batch_size, 1)
+
+        # Concatenate along the last dimension
+        x = torch.cat([x, eye], dim=2)
     
         # Filter out distant agents and adjust input for convolution layers
-        x, _ = self.remove_distant_agents(x)
+        x, _ = remove_distant_agents(x)
         #x = x.transpose(1, 2)  # BxCxN
         
         # Apply convolution layers
-        x = F.relu(self.conv1(x.permute(0,2,1))
+        x = F.relu(self.conv1(x.permute(0,2,1)))
         x = F.relu(self.conv2(x))
         # Apply global max pooling
         x, _ = torch.max(x, dim=2)
         
         # Combine with goal and current velocity information
-        x = torch.cat([x, s[:, :, :2] - g, s[:, :, 2:]], dim=1)
-        
+        x = torch.cat([x, s[:, :2] - g, s[:, 2:]], dim=1)
+
         # Apply fully connected layers
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
@@ -149,9 +157,28 @@ class NetworkAction(nn.Module):
         x = self.fc4(x)
         
         x = 2.0 * torch.sigmoid(x) - 1.0
-        return x
+        k_1, k_2, k_3, k_4 = torch.split(x, x.size(1) // 4, dim=1)
 
-def remove_distant_agents(x, indices=None):
+        # Create a tensor of zeros with the same shape as k_1
+        zeros = torch.zeros_like(k_1)
+
+        # Concatenate tensors along axis 1 to create gain_x and gain_y
+        gain_x = -torch.cat([k_1, zeros, k_2, zeros], dim=1)
+        gain_y = -torch.cat([zeros, k_3, zeros, k_4], dim=1)
+
+        # Concatenate tensors along axis 1 to create the state tensor
+        state = torch.cat([s[:, :2] - g, s[:, 2:]], dim=1)
+
+        # Sum along axis 1 and keep the dimensions for a_x and a_y
+        a_x = torch.sum(state * gain_x, dim=1, keepdim=True)
+        a_y = torch.sum(state * gain_y, dim=1, keepdim=True)
+
+        # Concatenate a_x and a_y along axis 1 to get the final tensor `a`
+        a = torch.cat([a_x, a_y], dim=1)
+
+        return a
+
+def remove_distant_agents(x, indices = None):
     n, _, c = x.size()
     if n <= config.TOP_K:
         return x, False
@@ -159,6 +186,7 @@ def remove_distant_agents(x, indices=None):
     if indices is not None:
         x = x[indices]
         return x, indices
+
     _, indices = torch.topk(-d_norm, k = config.TOP_K, dim=1)
     row_indices = torch.arange(indices.size(0), device=indices.device).unsqueeze(1).expand(-1, config.TOP_K)
     row_indices = row_indices.reshape(-1, 1)
@@ -199,7 +227,7 @@ def loss_barrier(h, s, r, ttc, eps=[1e-3, 0]):
         accuracy of dangerous conditions, and accuracy of safe conditions.
     """
     h_reshape = h.view(-1)
-    dang_mask = ttc_dangerous_mask(s, r=r, ttc=ttc)  # Assuming adaptation to PyTorch
+    dang_mask = ttc_dangerous_mask(s, r=r, ttc=ttc)  
     dang_mask_reshape = dang_mask.view(-1)
     safe_mask_reshape = ~dang_mask_reshape
 
@@ -244,8 +272,9 @@ def loss_derivatives(s, a, h, x, r, ttc, alpha, time_step, dist_min_thres, eps=[
     dsdt = dynamics(s, a)
     s_next = s + dsdt * time_step
 
-    x_next = torch.unsqueeze(s_next, 1) - torch.unsqueeze(s_next, 0)
-    h_next, mask_next, _ = network_cbf(x=x_next, r=dist_min_thres)  # Assuming adaptation to PyTorch
+    cbf = NetworkCBF()
+    x_next = torch.unsqueeze(s_next,1) - torch.unsqueeze(s_next,0)
+    h_next, mask_next = cbf(x_next, config.DIST_MIN_THRES)  # Assuming adaptation to PyTorch
 
     deriv = h_next - h + time_step * alpha * h
 
@@ -253,7 +282,6 @@ def loss_derivatives(s, a, h, x, r, ttc, alpha, time_step, dist_min_thres, eps=[
     dang_mask = ttc_dangerous_mask(s=s, r=r, ttc=ttc)  # Assuming adaptation to PyTorch
     dang_mask_reshape = dang_mask.view(-1)
     safe_mask_reshape = ~dang_mask_reshape
-
     dang_deriv = deriv_reshape[dang_mask_reshape]
     safe_deriv = deriv_reshape[safe_mask_reshape]
 
@@ -312,7 +340,7 @@ def statics(s, a, h, alpha, time_step, dist_min_thres):
     s_next = s + dsdt * time_step
 
     x_next = torch.unsqueeze(s_next, 1) - torch.unsqueeze(s_next, 0)
-    h_next, mask_next, _ = network_cbf(x=x_next, r=dist_min_thres)  # Assuming adaptation to PyTorch
+    h_next, mask_next, _ = NetworkCBF(x=x_next, r=dist_min_thres)  # Assuming adaptation to PyTorch
 
     deriv = h_next - h + time_step * alpha * h
 
@@ -323,7 +351,7 @@ def statics(s, a, h, alpha, time_step, dist_min_thres):
     return mean_deriv, std_deriv, prob_neg
 
 
-def ttc_dangerous_mask(s, r, ttc, top_k):
+def ttc_dangerous_mask(s, r, ttc):
     """
     Calculate a mask identifying dangerous situations based on time-to-collision (TTC) in PyTorch.
 
@@ -339,7 +367,7 @@ def ttc_dangerous_mask(s, r, ttc, top_k):
     # Assuming remove_distant_agents is adapted to PyTorch and returns appropriate tensors
     s_diff = torch.unsqueeze(s, 1) - torch.unsqueeze(s, 0)
     s_diff = torch.cat([s_diff, torch.unsqueeze(torch.eye(s.size(0), device=s.device), 2)], dim=2)
-    s_diff, _ = remove_distant_agents(s_diff, top_k)  # Placeholder for actual implementation
+    s_diff, _ = remove_distant_agents(s_diff)  # Placeholder for actual implementation
     
     x, y, vx, vy, eye = torch.split(s_diff, [1, 1, 1, 1, 1], dim=2)
     x = x + eye
@@ -378,23 +406,3 @@ def ttc_dangerous_mask_np(s, r, ttc):
 
     return ttc_dangerous
 
-
-def remove_distant_agents(x, k, indices=None):
-    n, _, c = x.size()
-    if n <= k:
-        return x, False
-    
-    d_norm = torch.sqrt(torch.sum(torch.square(x[:, :, :2]) + 1e-6, dim=2))
-    
-    if indices is not None:
-        x = x[indices.flatten()].reshape(n, k, c)
-        return x, indices
-    
-    _, indices = torch.topk(-d_norm, k=k, dim=1)
-    row_indices = torch.arange(indices.size(0)).unsqueeze(1).expand_as(indices)
-    row_indices = row_indices.flatten().unsqueeze(1)
-    column_indices = indices.flatten().unsqueeze(1)
-    indices = torch.cat((row_indices, column_indices), dim=1)
-    x = x[indices.flatten()].reshape(n, k, c)
-    
-    return x, indices
