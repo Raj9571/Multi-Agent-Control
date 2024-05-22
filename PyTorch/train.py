@@ -124,8 +124,14 @@ def train_epoch(num_agents, model_cbf, model_action, dataloader, optimizer_cbf, 
 
         total_loss += loss.item()
         avg_loss = total_loss /(j+1)
+        
+        if (j) % config.SAVE_STEPS == 0:
+            torch.save({
+                'model_cbf_state_dict': model_cbf.state_dict(),
+                'model_action_state_dict': model_action.state_dict(),
+            }, os.path.join('models', f'model_epoch_{j}.pth'))
         j = j + 1
-        print(f'Epoch [{j+1}/{config.TRAIN_STEPS}], Loss: {avg_loss:.4f}')
+        print(f'Epoch [{j}/{config.TRAIN_STEPS}], Loss: {avg_loss:.4f}')
 
     return avg_loss
     
@@ -139,21 +145,13 @@ def main():
     model_cbf = core.NetworkCBF().to(device)
     model_action = core.NetworkAction().to(device)
     
-    optimizer_cbf = optim.Adam(model_cbf.parameters(), lr=config.LEARNING_RATE)
-    optimizer_action = optim.Adam(model_action.parameters(), lr=config.LEARNING_RATE)
+    optimizer_cbf = optim.SGD(model_cbf.parameters(), lr=config.LEARNING_RATE)
+    optimizer_action = optim.SGD(model_action.parameters(), lr=config.LEARNING_RATE)
 
     dataloader = AgentDataset(args.num_agents, config.DIST_MIN_THRES, num_samples=1000)
     # dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
-    for epoch in range(config.TRAIN_STEPS):
-        avg_loss = train_epoch(args.num_agents, model_cbf, model_action, dataloader, optimizer_cbf, optimizer_action, device)
-        
-        
-        if (epoch + 1) % config.SAVE_STEPS == 0:
-            torch.save({
-                'model_cbf_state_dict': model_cbf.state_dict(),
-                'model_action_state_dict': model_action.state_dict(),
-            }, os.path.join('models', f'model_epoch_{epoch+1}.pth'))
-            print(f'Models saved at epoch {epoch+1}')
+    avg_loss = train_epoch(args.num_agents, model_cbf, model_action, dataloader, optimizer_cbf, optimizer_action, device)
+    print(f'Final loss {avg_loss}')
             
 if __name__ == '__main__':
     main()
