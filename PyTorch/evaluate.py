@@ -40,11 +40,15 @@ def get_next(s, g, a, model_cbf):
         deriv = h_next - h + config.TIME_STEP * config.ALPHA_CBF * h
         deriv = deriv * mask * mask_next
         error = torch.sum(torch.maximum(-deriv, torch.tensor(0.0)), axis=1)
+        # print(error.shape)
+        # print(a_res.shape)
+        error = error.sum()
         # compute the gradient to update a_res
-        error.backward()
-        with torch.no_grad():
-            a_res -= config.REFINE_LEARNING_RATE * a_res.grad
-        a_res.grad.zero_()
+        error.backward(retain_graph=True)
+        # error_gradient = torch.autograd.grad(error,a_res)
+        optim = torch.optim.SGD([a_res], lr=0.01)
+        optim.step()
+        # print(f'a_res shape {a_res}')
         loop_count += 1
         return a_res, loop_count
 
@@ -64,9 +68,9 @@ def get_next(s, g, a, model_cbf):
     dsdt = core.dynamics(s, a_opt)
     s_next = s + dsdt * config.TIME_STEP
     x_next = s_next.unsqueeze(1) - s_next.unsqueeze(0)
-    h_next, mask_next, _ = core.network_cbf(x=x_next, r=config.DIST_MIN_THRES, indices=None)
+    h_next, mask_next = model_cbf(x=x_next, r=config.DIST_MIN_THRES)
     
-    return s, g, a_opt, x_next
+    return h_next, s_next, a_opt, x_next
 
 def print_accuracy(accuracy_lists):
     acc = np.array(accuracy_lists)
@@ -121,13 +125,14 @@ def main():
         s_np_ori, g_np_ori = core.generate_data(args.num_agents, config.DIST_MIN_THRES * 1.5)
 
         s_np, g_np = torch.tensor(s_np_ori, dtype=torch.float32).to(device), torch.tensor(g_np_ori, dtype=torch.float32).to(device)
-        init_dist_errors.append(np.mean(np.linalg.norm(s_np[:, :2].cpu().numpy() - g_np.cpu().numpy(), axis=1)))
+        init_dist_errors.append(np.mean(np.linalg.norm(s_np[:, :2].detach().numpy() - g_np.cpu().numpy(), axis=1)))
         # store the trajectory for visualization
         s_np_ours = []
         s_np_lqr = []
 
         safety_ours = []
         safety_lqr = []
+        j = 0
         # run INNER_LOOPS steps to reach the current goals
         for i in range(config.INNER_LOOPS):
             # compute the control input
@@ -144,17 +149,16 @@ def main():
             # loss_medium_deriv is for doth(s) + alpha h(s) >=0 for s not in the dangerous
             # or the safe set
             (loss_dang_deriv, loss_safe_deriv, acc_dang_deriv, acc_safe_deriv
-                ) = core.loss_derivatives(s=s_next, a=a_opt, h=h_next, x=x_next, 
-                r=config.DIST_MIN_THRES, ttc=config.TIME_TO_COLLISION, alpha=config.ALPHA_CBF, indices=None)
+                ) = core.loss_derivatives(s=s_next, a=a_opt, h=h_next, x=x_next, r=config.OBS_RADIUS, ttc=config.TIME_TO_COLLISION, alpha=config.ALPHA_CBF, time_step = config.TIME_STEP, dist_min_thres = config.DIST_MIN_THRES)
             # the distance between the u_opt and the nominal u
             loss_action = core.loss_actions(s_np, g_np, a_network, r=config.DIST_MIN_THRES, ttc=config.TIME_TO_COLLISION)
 
             loss_list = [loss_dang, loss_safe, loss_dang_deriv, loss_safe_deriv, loss_action]
             acc_list_np = [acc_dang, acc_safe, acc_dang_deriv, acc_safe_deriv]
             s_np = s_np + dsdt * config.TIME_STEP
-            s_np_ours.append(s_np.cpu().numpy())
+            s_np_ours.append(s_np.detach().numpy())
             safety_ratio = 1 - np.mean(core.ttc_dangerous_mask_np(
-                s_np.cpu().numpy(), config.DIST_MIN_CHECK, config.TIME_TO_COLLISION_CHECK), axis=1)
+                s_np.detach().numpy(), config.DIST_MIN_CHECK, config.TIME_TO_COLLISION_CHECK), axis=1)
             safety_ours.append(safety_ratio)
             safety_info.append((safety_ratio == 1).astype(np.float32).reshape((1, -1)))
             safety_ratio = np.mean(safety_ratio == 1)
@@ -164,29 +168,31 @@ def main():
             if args.vis:
                 # break if the agents are already very close to their goals
                 if np.amax(
-                    np.linalg.norm(s_np[:, :2].cpu().numpy() - g_np.cpu().numpy(), axis=1)
+                    np.linalg.norm(s_np[:, :2].detach().numpy() - g_np.cpu().numpy(), axis=1)
                     ) < config.DIST_MIN_CHECK / 3:
                     time.sleep(1)
                     break
                 # if the agents are very close to their goals, safely switch to LQR
                 if np.mean(
-                    np.linalg.norm(s_np[:, :2].cpu().numpy() - g_np.cpu().numpy(), axis=1)
+                    np.linalg.norm(s_np[:, :2].detach().numpy() - g_np.cpu().numpy(), axis=1)
                     ) < config.DIST_MIN_CHECK / 2:
                     K = np.eye(2, 4) + np.eye(2, 4, k=2) * np.sqrt(3)
-                    s_ref = np.concatenate([s_np[:, :2].cpu().numpy() - g_np.cpu().numpy(), s_np[:, 2:].cpu().numpy()], axis=1)
+                    s_ref = np.concatenate([s_np[:, :2].detach().numpy() - g_np.cpu().numpy(), s_np[:, 2:].detach().numpy()], axis=1)
                     a_lqr = -s_ref.dot(K.T)
                     s_np = s_np + torch.tensor(np.concatenate(
                         [s_np[:, 2:], a_lqr], axis=1), dtype=torch.float32).to(device) * config.TIME_STEP
             else:
                 if np.mean(
-                    np.linalg.norm(s_np[:, :2].cpu().numpy() - g_np.cpu().numpy(), axis=1)
+                    np.linalg.norm(s_np[:, :2].detach().numpy() - g_np.cpu().numpy(), axis=1)
                     ) < config.DIST_MIN_CHECK:
                     break
+            j = j + 1
+            print(f'inner loop {j}')
 
-        dist_errors.append(np.mean(np.linalg.norm(s_np[:, :2].cpu().numpy() - g_np.cpu().numpy(), axis=1)))
+        dist_errors.append(np.mean(np.linalg.norm(s_np[:, :2].detach().numpy() - g_np.cpu().numpy(), axis=1)))
         safety_reward.append(np.mean(np.sum(np.concatenate(safety_info, axis=0) - 1, axis=0)))
         dist_reward.append(np.mean(
-            (np.linalg.norm(s_np[:, :2] - g_np, axis=1) < 0.2).astype(np.float32) * 10))
+            (np.linalg.norm((s_np[:, :2] - g_np).detach().numpy(), axis=1) < 0.2).astype(np.float32) * 10))
 
         # run the simulation using LQR controller without considering collision
         s_np, g_np = np.copy(s_np_ori), np.copy(g_np_ori)
