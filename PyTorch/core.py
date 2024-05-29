@@ -6,7 +6,61 @@ import torch.nn.functional as F
 
 import config
 
+"""
+import torch
 
+def filter_agents(states, r_danger, fov_degrees):
+    # Convert FOV from degrees to radians
+    fov_radians = fov_degrees * (torch.pi / 180.0)
+    half_fov = fov_radians / 2
+
+    n = states.size(0)
+
+    # Split the states tensor into position and velocity components
+    positions = states[:, :2]  # shape: (n, 2)
+    velocities = states[:, 2:]  # shape: (n, 2)
+
+    # Compute pairwise differences of positions
+    pos_diff = positions.unsqueeze(1) - positions.unsqueeze(0)  # shape: (n, n, 2)
+
+    # Compute pairwise distances
+    dists = torch.norm(pos_diff, dim=2)  # shape: (n, n)
+
+    # Create a mask for distances within the danger radius
+    within_radius_mask = (dists < r_danger) & (dists > 0)  # shape: (n, n)
+
+    # Normalize the velocity vectors
+    norm_velocities = velocities / torch.norm(velocities, dim=1, keepdim=True)  # shape: (n, 2)
+
+    # Normalize the position difference vectors
+    norm_pos_diff = pos_diff / (torch.norm(pos_diff, dim=2, keepdim=True) + 1e-6)  # shape: (n, n, 2)
+
+    # Compute the dot product between the velocity vectors and the normalized position difference vectors
+    dot_products = torch.sum(norm_velocities.unsqueeze(1) * norm_pos_diff, dim=2)  # shape: (n, n)
+
+    # Compute the angles between the vectors
+    angles = torch.acos(dot_products.clamp(-1.0, 1.0))  # shape: (n, n)
+
+    # Create a mask for angles within the FOV
+    within_fov_mask = angles < half_fov  # shape: (n, n)
+
+    # Combine the masks
+    valid_mask = within_radius_mask & within_fov_mask  # shape: (n, n)
+
+    # Get the indices of the valid (i, j) pairs
+    indices = valid_mask.nonzero(as_tuple=False)  # shape: (num_pairs, 2)
+
+    return indices
+
+# Example usage:
+states = torch.rand(32, 4)  # (n, 4) tensor representing the states of 32 agents
+r_danger = 0.5  # radius within which to check for other agents
+fov_degrees = 90  # field of view in degrees
+
+
+print(indices)
+
+"""
 
 def generate_obstacle_circle(center, radius, num=12):
     theta = np.linspace(0, np.pi*2, num=num, endpoint=False).reshape(-1, 1)
