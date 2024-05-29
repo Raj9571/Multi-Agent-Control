@@ -136,27 +136,37 @@ class NetworkAction(nn.Module):
 
         # Concatenate along the last dimension
         x = torch.cat([x, eye], dim=2)
-    
+        # print(f'initial {x.shape}')
         # Filter out distant agents and adjust input for convolution layers
         x, _ = remove_distant_agents(x)
+        dist = torch.norm(x[:, :, :2], dim=2, keepdim=True)
+        mask = (dist < config.OBS_RADIUS).float().clone().detach()
         #x = x.transpose(1, 2)  # BxCxN
-        
+        # print(f'removed {x.shape}')
         # Apply convolution layers
-        x = F.relu(self.conv1(x.permute(0,2,1)))
+        x = x.permute(0,2,1)
+        x = F.relu(self.conv1(x))
+        # print(f'1 {x.shape}')
         x = F.relu(self.conv2(x))
         # Apply global max pooling
-        x, _ = torch.max(x, dim=2)
+        # print(f'mask {mask.shape} x {x.shape}')
         
+        x, _ = torch.max(x*mask.permute(0,2,1), dim=2)
+        # print(f'pooled {x.shape}')
         # Combine with goal and current velocity information
         x = torch.cat([x, s[:, :2] - g, s[:, 2:]], dim=1)
-
+        # print(f'catting {x.shape}')
         # Apply fully connected layers
         x = F.relu(self.fc1(x))
+        # print(f'1 {x.shape}')
         x = F.relu(self.fc2(x))
+        # print(f'2 {x.shape}')
         x = F.relu(self.fc3(x))
+        # print(f'3 {x.shape}')
         x = self.fc4(x)
-        
+        # print(f'4 {x.shape}')
         x = 2.0 * torch.sigmoid(x) - 1.0
+        # print(f'5 {x.shape}')
         k_1, k_2, k_3, k_4 = torch.split(x, x.size(1) // 4, dim=1)
 
         # Create a tensor of zeros with the same shape as k_1
@@ -196,6 +206,7 @@ def remove_distant_agents(x, indices = None):
     x = x.reshape(n, config.TOP_K, c)
     return x, indices
 
+
 def dynamics(s, a):
     """
     The ground robot dynamics in PyTorch.
@@ -213,19 +224,7 @@ def dynamics(s, a):
 
 
 def loss_barrier(h, s, r, ttc, eps=[1e-3, 0]):
-    """
-    Build the loss function for the control barrier functions in PyTorch.
-
-    Args:
-        h (Tensor): The control barrier function, shape (N, N, 1).
-        s (Tensor): The current state of N agents, shape (N, 4).
-        r (float): The radius of the safe regions.
-        ttc (float): The threshold of time to collision.
     
-    Returns:
-        Tuple[Tensor, Tensor, Tensor, Tensor]: The dangerous loss, safe loss, 
-        accuracy of dangerous conditions, and accuracy of safe conditions.
-    """
     h_reshape = h.view(-1)
     dang_mask = ttc_dangerous_mask(s, r=r, ttc=ttc)  
     dang_mask_reshape = dang_mask.view(-1)
@@ -250,25 +249,7 @@ def loss_barrier(h, s, r, ttc, eps=[1e-3, 0]):
 
 
 def loss_derivatives(s, a, h, x, r, ttc, alpha, time_step, dist_min_thres, eps=[1e-3, 0]):
-    """
-    Calculate the loss based on derivatives of the control barrier function in PyTorch.
-
-    Args:
-        s (Tensor): The current state of N agents, shape (N, 4).
-        a (Tensor): The acceleration taken by each agent, shape (N, 2).
-        h (Tensor): The control barrier function, shape (N, N, 1).
-        x (Tensor): Input features for the network_cbf, possibly the relative positions.
-        r (float): The radius of the safe regions.
-        ttc (float): The threshold of time to collision.
-        alpha (float): Scaling factor for the derivative term.
-        time_step (float): Time step used for the derivative approximation.
-        dist_min_thres (float): Minimum distance threshold for considering agents.
-        eps (list): Epsilon values for loss calculations.
-
-    Returns:
-        Tuple[Tensor, Tensor, Tensor, Tensor]: The dangerous derivative loss, safe derivative loss,
-                                               accuracy of dangerous conditions, accuracy of safe conditions.
-    """
+   
     dsdt = dynamics(s, a)
     s_next = s + dsdt * time_step
 
