@@ -32,6 +32,13 @@ class AgentDataset(Dataset):
     def __getitem__(self, idx):
         states, goals = self.data[idx]
         return torch.tensor(states, dtype=torch.float32), torch.tensor(goals, dtype=torch.float32)
+
+def count_accuracy(accuracy_lists):
+    acc = np.array(accuracy_lists)
+    acc_list = []
+    for i in range(acc.shape[1]):
+        acc_list.append(np.mean(acc[acc[:, i] >= 0, i]))
+    return acc_list
      
 #single epoch loop
 def train_epoch(num_agents, model_cbf, model_action, dataloader, optimizer_cbf, optimizer_action, device):
@@ -72,7 +79,7 @@ def train_epoch(num_agents, model_cbf, model_action, dataloader, optimizer_cbf, 
                     ) < config.DIST_MIN_CHECK:
                     break
             x = torch.unsqueeze(s_np, 1) - torch.unsqueeze(s_np, 0)
-            h, mask = model_cbf(x, config.DIST_MIN_THRES)
+            h, mask = model_cbf(s_np, x, config.DIST_MIN_THRES)
             loss_action = core.loss_actions(
             s=s_np, g=g_np, a=a_np, r=config.DIST_MIN_THRES, ttc=config.TIME_TO_COLLISION)
 
@@ -131,7 +138,7 @@ def train_epoch(num_agents, model_cbf, model_action, dataloader, optimizer_cbf, 
                 'model_action_state_dict': model_action.state_dict(),
             }, os.path.join('models', f'model_epoch_{j}.pth'))
         j = j + 1
-        print(f'Epoch [{j}/{config.TRAIN_STEPS}], Loss: {avg_loss:.4f}')
+        print(f'Epoch [{j}/{config.TRAIN_STEPS}], Loss: {avg_loss:.4f}, accuracy: {np.array(count_accuracy(acc_lists_np))}')
 
     return avg_loss
     
