@@ -6,61 +6,7 @@ import torch.nn.functional as F
 
 import config
 
-"""
-import torch
 
-def filter_agents(states, r_danger, fov_degrees):
-    # Convert FOV from degrees to radians
-    fov_radians = fov_degrees * (torch.pi / 180.0)
-    half_fov = fov_radians / 2
-
-    n = states.size(0)
-
-    # Split the states tensor into position and velocity components
-    positions = states[:, :2]  # shape: (n, 2)
-    velocities = states[:, 2:]  # shape: (n, 2)
-
-    # Compute pairwise differences of positions
-    pos_diff = positions.unsqueeze(1) - positions.unsqueeze(0)  # shape: (n, n, 2)
-
-    # Compute pairwise distances
-    dists = torch.norm(pos_diff, dim=2)  # shape: (n, n)
-
-    # Create a mask for distances within the danger radius
-    within_radius_mask = (dists < r_danger) & (dists > 0)  # shape: (n, n)
-
-    # Normalize the velocity vectors
-    norm_velocities = velocities / torch.norm(velocities, dim=1, keepdim=True)  # shape: (n, 2)
-
-    # Normalize the position difference vectors
-    norm_pos_diff = pos_diff / (torch.norm(pos_diff, dim=2, keepdim=True) + 1e-6)  # shape: (n, n, 2)
-
-    # Compute the dot product between the velocity vectors and the normalized position difference vectors
-    dot_products = torch.sum(norm_velocities.unsqueeze(1) * norm_pos_diff, dim=2)  # shape: (n, n)
-
-    # Compute the angles between the vectors
-    angles = torch.acos(dot_products.clamp(-1.0, 1.0))  # shape: (n, n)
-
-    # Create a mask for angles within the FOV
-    within_fov_mask = angles < half_fov  # shape: (n, n)
-
-    # Combine the masks
-    valid_mask = within_radius_mask & within_fov_mask  # shape: (n, n)
-
-    # Get the indices of the valid (i, j) pairs
-    indices = valid_mask.nonzero(as_tuple=False)  # shape: (num_pairs, 2)
-
-    return indices
-
-# Example usage:
-states = torch.rand(32, 4)  # (n, 4) tensor representing the states of 32 agents
-r_danger = 0.5  # radius within which to check for other agents
-fov_degrees = 90  # field of view in degrees
-
-
-print(indices)
-
-"""
 
 def generate_obstacle_circle(center, radius, num=12):
     theta = np.linspace(0, np.pi*2, num=num, endpoint=False).reshape(-1, 1)
@@ -125,6 +71,57 @@ def generate_data(num_agents, dist_min_thres):
         [states, np.zeros(shape=(num_agents, 2), dtype=np.float32)], axis=1)
     return states, goals
 
+def filter_agents(states, r_danger, fov_degrees):
+    # Convert FOV from degrees to radians
+    fov_radians = fov_degrees * (torch.pi / 180.0)
+    half_fov = fov_radians / 2
+
+    n = states.size(0)
+
+    # Split the states tensor into position and velocity components
+    positions = states[:, :2]  # shape: (n, 2)
+    velocities = states[:, 2:]  # shape: (n, 2)
+
+    # Compute pairwise differences of positions
+    pos_diff = positions.unsqueeze(1) - positions.unsqueeze(0)  # shape: (n, n, 2)
+
+    # Compute pairwise distances
+    dists = torch.norm(pos_diff, dim=2)  # shape: (n, n)
+
+    # Create a mask for distances within the danger radius
+    within_radius_mask = (dists < r_danger) & (dists > 0)  # shape: (n, n)
+
+    # Normalize the velocity vectors
+    norm_velocities = velocities / torch.norm(velocities, dim=1, keepdim=True)  # shape: (n, 2)
+
+    # Normalize the position difference vectors
+    norm_pos_diff = pos_diff / (torch.norm(pos_diff, dim=2, keepdim=True) + 1e-6)  # shape: (n, n, 2)
+
+    # Compute the dot product between the velocity vectors and the normalized position difference vectors
+    dot_products = torch.sum(norm_velocities.unsqueeze(1) * norm_pos_diff, dim=2)  # shape: (n, n)
+
+    # Compute the angles between the vectors
+    angles = torch.acos(dot_products.clamp(-1.0, 1.0))  # shape: (n, n)
+
+    # Create a mask for angles within the FOV
+    within_fov_mask = angles < half_fov  # shape: (n, n)
+
+    # Combine the masks
+    valid_mask = within_radius_mask & within_fov_mask  # shape: (n, n)
+
+    # Get the indices of the valid (i, j) pairs
+    indices = valid_mask.nonzero(as_tuple=False)  # shape: (num_pairs, 2)
+
+    return valid_mask, indices
+
+# # Example usage:
+# states = torch.rand(32, 4)  # (n, 4) tensor representing the states of 32 agents
+# r_danger = 0.5  # radius within which to check for other agents
+# fov_degrees = 90  # field of view in degrees
+# k_neighbors = 12  # number of nearest neighbors to consider
+
+# indices = filter_agents_with_fov(states, r_danger, fov_degrees, k_neighbors)
+# print(indices)
 
 #class of CBF
 class NetworkCBF(nn.Module):
@@ -139,31 +136,42 @@ class NetworkCBF(nn.Module):
         self.conv4 = nn.Conv1d(in_channels=64, out_channels=1, kernel_size=1)
 
     
-    def forward(self, x, r):
+    def forward(self, s, x, r):
         # Calculate norm
         d_norm = torch.sqrt(torch.sum(torch.square(x[:, :, :2]) + 1e-4, dim=2))
+        # print(f'x shape: {x.shape}')
         # Identity matrix for self identification
         eye = torch.eye(x.shape[0], device=x.device).unsqueeze(-1)  # Ensure correct dimension
         # Concatenate additional features
         
         x = torch.cat([x, eye, (d_norm.unsqueeze(-1) - r)], dim=-1)
+        # print(f'x shape: {x.shape}')# Filter agents
+        valid_mask, indices_in_sector = filter_agents(s, config.OBS_RADIUS, config.FOV_DEG)
+
+        # Initialize the tensor masked_x with the desired shape
+        masked_x = torch.full_like(x, 100.0)
         
-        x, _ = remove_distant_agents(x) #if needed
-        
+        # Ensure valid_mask is correctly expanded to match the shape of x
+        valid_mask_expanded = valid_mask.unsqueeze(-1)  # shape: (32, 32)
+        # Apply the valid_mask to copy the valid elements from x to masked_x
+        x = torch.where(valid_mask_expanded, x, masked_x)
+
+        # print(f'x shape: {x.shape}')
         # Ensure the distance calculation and masking logic align with your new tensor shape
         dist = torch.sqrt(torch.sum(x[..., :2]**2 + 1e-4, dim=-1, keepdim=True))
         mask = (dist <= self.obs_radius).float()
-        
-        # Pass through convolutional layers
-        
         x = F.relu(self.conv1(x.permute(0,2,1)))
-        
+        # print(f'masked_x shape: {x.shape}')
         x = F.relu(self.conv2(x))
+        # print(f'masked_x shape: {x.shape}')
         x = F.relu(self.conv3(x))
+        # print(f'masked_x shape: {x.shape}')
         x = self.conv4(x)
-        
+        # print(f'masked_x shape: {x.shape}')
         # Apply mask
-        x = x.permute(0,2,1) * mask
+        x = x* mask.permute(0,2,1)
+        x = x.permute(0,2,1) 
+        # print(f'masked_x shape: {x.shape}')
         return x, mask
 
 #class of action
@@ -192,7 +200,6 @@ class NetworkAction(nn.Module):
         x = torch.cat([x, eye], dim=2)
         # print(f'initial {x.shape}')
         # Filter out distant agents and adjust input for convolution layers
-        x, _ = remove_distant_agents(x)
         dist = torch.norm(x[:, :, :2], dim=2, keepdim=True)
         mask = (dist < config.OBS_RADIUS).float().clone().detach()
         #x = x.transpose(1, 2)  # BxCxN
@@ -203,8 +210,22 @@ class NetworkAction(nn.Module):
         # print(f'1 {x.shape}')
         x = F.relu(self.conv2(x))
         # Apply global max pooling
-        # print(f'mask {mask.shape} x {x.shape}')
-        
+        # print(f'x {x.shape} mask {mask.shape}')
+        valid_mask, indices = filter_agents(s, config.OBS_RADIUS, config.FOV_DEG)
+
+        # Initialize the tensor x with the desired shape
+          # this is the tensor that we want to mask
+        # print(f'should be (32,128,32) {x.shape}')
+
+        # Create a mask tensor filled with 100
+        masked_x = torch.full_like(x, 100.0)
+        # print(masked_x.shape)
+
+        # Broadcast the valid_mask to match the shape of x
+        valid_mask_expanded = valid_mask.unsqueeze(1).unsqueeze(3).expand(-1, 128, -1, 32)  # shape: (32, 128, 32, 32)
+
+        # Apply the valid_mask to copy the valid elements from x to masked_x
+        masked_x = torch.where(valid_mask_expanded[:, :, :, 0], x, masked_x)
         x, _ = torch.max(x*mask.permute(0,2,1), dim=2)
         # print(f'pooled {x.shape}')
         # Combine with goal and current velocity information
@@ -220,7 +241,7 @@ class NetworkAction(nn.Module):
         x = self.fc4(x)
         # print(f'4 {x.shape}')
         x = 2.0 * torch.sigmoid(x) - 1.0
-        # print(f'5 {x.shape}')
+        #print(f'5 {x.shape}')
         k_1, k_2, k_3, k_4 = torch.split(x, x.size(1) // 4, dim=1)
 
         # Create a tensor of zeros with the same shape as k_1
@@ -309,7 +330,7 @@ def loss_derivatives(s, a, h, x, r, ttc, alpha, time_step, dist_min_thres, eps=[
 
     cbf = NetworkCBF()
     x_next = torch.unsqueeze(s_next,1) - torch.unsqueeze(s_next,0)
-    h_next, mask_next = cbf(x_next, config.DIST_MIN_THRES)  # Assuming adaptation to PyTorch
+    h_next, mask_next = cbf(s_next, x_next, config.DIST_MIN_THRES)  # Assuming adaptation to PyTorch
 
     deriv = h_next - h + time_step * alpha * h
 
@@ -402,8 +423,19 @@ def ttc_dangerous_mask(s, r, ttc):
     # Assuming remove_distant_agents is adapted to PyTorch and returns appropriate tensors
     s_diff = torch.unsqueeze(s, 1) - torch.unsqueeze(s, 0)
     s_diff = torch.cat([s_diff, torch.unsqueeze(torch.eye(s.size(0), device=s.device), 2)], dim=2)
-    s_diff, _ = remove_distant_agents(s_diff)  # Placeholder for actual implementation
+    # s_diff, _ = remove_distant_agents(s_diff)  # Placeholder for actual implementation
+    # print(f'sdiff shape: {s_diff.shape}')# Filter agents
+    valid_mask, indices_in_sector = filter_agents(s, config.OBS_RADIUS, config.FOV_DEG)
+
+    # Initialize the tensor masked_x with the desired shape
+    masked_s_diff = torch.full_like(s_diff, 100.0)
     
+    # Ensure valid_mask is correctly expanded to match the shape of x
+    valid_mask_expanded = valid_mask.unsqueeze(-1)  # shape: (32, 32)
+    # Apply the valid_mask to copy the valid elements from x to masked_x
+    s_diff = torch.where(valid_mask_expanded, s_diff, masked_s_diff)
+
+    # print(f'sdiff shape: {s_diff.shape}')
     x, y, vx, vy, eye = torch.split(s_diff, [1, 1, 1, 1, 1], dim=2)
     x = x + eye
     y = y + eye
