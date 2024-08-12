@@ -1,11 +1,7 @@
 import numpy as np
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import tensorflow as tf
 
 import config
-
 
 
 def generate_obstacle_circle(center, radius, num=12):
@@ -72,317 +68,238 @@ def generate_data(num_agents, dist_min_thres):
     return states, goals
 
 
-#class of CBF
-class NetworkCBF(nn.Module):
-    def __init__(self):
-        super(NetworkCBF, self).__init__()
-        obs_radius = config.OBS_RADIUS
-        self.obs_radius = obs_radius
-        # Adjust in_channels to match the dimension after concatenation
-        self.conv1 = nn.Conv1d(in_channels=6, out_channels=64, kernel_size=1)
-        self.conv2 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=1)
-        self.conv3 = nn.Conv1d(in_channels=128, out_channels=64, kernel_size=1)
-        self.conv4 = nn.Conv1d(in_channels=64, out_channels=1, kernel_size=1)
+def network_cbf(x, r, indices=None):
+    d_norm = tf.sqrt(
+        tf.reduce_sum(tf.square(x[:, :, :2]) + 1e-4, axis=2))
+    x = tf.concat([x,
+        tf.expand_dims(tf.eye(tf.shape(x)[0]), 2),
+        tf.expand_dims(d_norm - r, 2)], axis=2)
+    x, indices = remove_distant_agents(x=x, k=config.TOP_K, indices=indices)
+    dist = tf.sqrt(
+        tf.reduce_sum(tf.square(x[:, :, :2]) + 1e-4, axis=2, keepdims=True))
+    mask = tf.cast(tf.less_equal(dist, config.OBS_RADIUS), tf.float32)
+    x = tf.contrib.layers.conv1d(inputs=x, 
+                                 num_outputs=64,
+                                 kernel_size=1, 
+                                 reuse=tf.AUTO_REUSE,
+                                 scope='cbf/conv_1', 
+                                 activation_fn=tf.nn.relu)
+    x = tf.contrib.layers.conv1d(inputs=x, 
+                                 num_outputs=128,
+                                 kernel_size=1, 
+                                 reuse=tf.AUTO_REUSE,
+                                 scope='cbf/conv_2', 
+                                 activation_fn=tf.nn.relu)
+    x = tf.contrib.layers.conv1d(inputs=x, 
+                                 num_outputs=64,
+                                 kernel_size=1, 
+                                 reuse=tf.AUTO_REUSE,
+                                 scope='cbf/conv_3', 
+                                 activation_fn=tf.nn.relu)
+    x = tf.contrib.layers.conv1d(inputs=x, 
+                                 num_outputs=1,
+                                 kernel_size=1, 
+                                 reuse=tf.AUTO_REUSE,
+                                 scope='cbf/conv_4', 
+                                 activation_fn=None)
+    x = x * mask
+    return x, mask, indices
 
-    
-    def forward(self, x, r):
-        # Calculate norm
-        d_norm = torch.sqrt(torch.sum(torch.square(x[:, :, :2]) + 1e-4, dim=2))
-        # Identity matrix for self identification
-        eye = torch.eye(x.shape[0], device=x.device).unsqueeze(-1)  # Ensure correct dimension
-        # Concatenate additional features
-        
-        x = torch.cat([x, eye, (d_norm.unsqueeze(-1) - r)], dim=-1)
-        
-        x, _ = remove_distant_agents(x) #if needed
-        
-        # Ensure the distance calculation and masking logic align with your new tensor shape
-        dist = torch.sqrt(torch.sum(x[..., :2]**2 + 1e-4, dim=-1, keepdim=True))
-        mask = (dist <= self.obs_radius).float()
-        
-        # Pass through convolutional layers
-        
-        x = F.relu(self.conv1(x.permute(0,2,1)))
-        
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
-        x = self.conv4(x)
-        
-        # Apply mask
-        x = x.permute(0,2,1) * mask
-        return x, mask
 
-#class of action
-class NetworkAction(nn.Module):
-    def __init__(self):
-        super(NetworkAction, self).__init__()
-        self.top_k = config.TOP_K
-        self.obs_radius = config.OBS_RADIUS
-        # Convolutional layers
-        self.conv1 = nn.Conv1d(in_channels=5, out_channels=64, kernel_size=1)
-        self.conv2 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=1)
-        # Fully connected layers
-        self.fc1 = nn.Linear(in_features=132, out_features=64)
-        self.fc2 = nn.Linear(in_features=64, out_features=128)
-        self.fc3 = nn.Linear(in_features=128, out_features=64)
-        self.fc4 = nn.Linear(in_features=64, out_features=4)
+def network_action(s, g, obs_radius=1.0, indices=None):
+    x = tf.expand_dims(s, 1) - tf.expand_dims(s, 0)
+    x = tf.concat([x,
+        tf.expand_dims(tf.eye(tf.shape(x)[0]), 2)], axis=2)
+    x, _ = remove_distant_agents(x=x, k=config.TOP_K, indices=indices)
+    dist = tf.norm(x[:, :, :2], axis=2, keepdims=True)
+    mask = tf.cast(tf.less(dist, obs_radius), tf.float32)
+    x = tf.contrib.layers.conv1d(inputs=x, 
+                                 num_outputs=64,
+                                 kernel_size=1, 
+                                 reuse=tf.AUTO_REUSE,
+                                 scope='action/conv_1', 
+                                 activation_fn=tf.nn.relu)
+    x = tf.contrib.layers.conv1d(inputs=x, 
+                                 num_outputs=128,
+                                 kernel_size=1, 
+                                 reuse=tf.AUTO_REUSE,
+                                 scope='action/conv_2', 
+                                 activation_fn=tf.nn.relu)
+    x = tf.reduce_max(x * mask, axis=1)
+    x = tf.concat([x, s[:, :2] - g, s[:, 2:]], axis=1)
+    x = tf.contrib.layers.fully_connected(inputs=x,
+                                          num_outputs=64,
+                                          reuse=tf.AUTO_REUSE,
+                                          scope='action/fc_1',
+                                          activation_fn=tf.nn.relu)
+    x = tf.contrib.layers.fully_connected(inputs=x,
+                                          num_outputs=128,
+                                          reuse=tf.AUTO_REUSE,
+                                          scope='action/fc_2',
+                                          activation_fn=tf.nn.relu)
+    x = tf.contrib.layers.fully_connected(inputs=x,
+                                          num_outputs=64,
+                                          reuse=tf.AUTO_REUSE,
+                                          scope='action/fc_3',
+                                          activation_fn=tf.nn.relu)
+    x = tf.contrib.layers.fully_connected(inputs=x,
+                                          num_outputs=4,
+                                          reuse=tf.AUTO_REUSE,
+                                          scope='action/fc_4',
+                                          activation_fn=None)
+    x = 2.0 * tf.nn.sigmoid(x) + 0.2
+    k_1, k_2, k_3, k_4 = tf.split(x, 4, axis=1)
+    zeros = tf.zeros_like(k_1)
+    gain_x = -tf.concat([k_1, zeros, k_2, zeros], axis=1)
+    gain_y = -tf.concat([zeros, k_3, zeros, k_4], axis=1)
+    state = tf.concat([s[:, :2] - g, s[:, 2:]], axis=1)
+    a_x = tf.reduce_sum(state * gain_x, axis=1, keepdims=True)
+    a_y = tf.reduce_sum(state * gain_y, axis=1, keepdims=True)
+    a = tf.concat([a_x, a_y], axis=1)
+    return a
 
-    def forward(self, s, g):
-        batch_size, seq_len = s.shape
-
-        #eye = torch.eye(seq_len, device=s.device).expand(batch_size, -1, -1).unsqueeze(1)
-        x = torch.unsqueeze(s, 1) - torch.unsqueeze(s, 0)  # NxNx4
-        eye = torch.eye(x.size(0)).unsqueeze(2)  # Shape: (batch_size, batch_size, 1)
-
-        # Concatenate along the last dimension
-        x = torch.cat([x, eye], dim=2)
-    
-        # Filter out distant agents and adjust input for convolution layers
-        x, _ = remove_distant_agents(x)
-        #x = x.transpose(1, 2)  # BxCxN
-        
-        # Apply convolution layers
-        x = F.relu(self.conv1(x.permute(0,2,1)))
-        x = F.relu(self.conv2(x))
-        # Apply global max pooling
-        x, _ = torch.max(x, dim=2)
-        
-        # Combine with goal and current velocity information
-        x = torch.cat([x, s[:, :2] - g, s[:, 2:]], dim=1)
-
-        # Apply fully connected layers
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = F.relu(self.fc3(x))
-        x = self.fc4(x)
-        
-        x = 2.0 * torch.sigmoid(x) - 1.0
-        k_1, k_2, k_3, k_4 = torch.split(x, x.size(1) // 4, dim=1)
-
-        # Create a tensor of zeros with the same shape as k_1
-        zeros = torch.zeros_like(k_1)
-
-        # Concatenate tensors along axis 1 to create gain_x and gain_y
-        gain_x = -torch.cat([k_1, zeros, k_2, zeros], dim=1)
-        gain_y = -torch.cat([zeros, k_3, zeros, k_4], dim=1)
-
-        # Concatenate tensors along axis 1 to create the state tensor
-        state = torch.cat([s[:, :2] - g, s[:, 2:]], dim=1)
-
-        # Sum along axis 1 and keep the dimensions for a_x and a_y
-        a_x = torch.sum(state * gain_x, dim=1, keepdim=True)
-        a_y = torch.sum(state * gain_y, dim=1, keepdim=True)
-
-        # Concatenate a_x and a_y along axis 1 to get the final tensor `a`
-        a = torch.cat([a_x, a_y], dim=1)
-
-        return a
-
-def remove_distant_agents(x, indices = None):
-    n, _, c = x.size()
-    if n <= config.TOP_K:
-        return x, False
-    d_norm = torch.sqrt(torch.sum(torch.square(x[:, :, :2]) + 1e-6, dim=2))
-    if indices is not None:
-        x = x[indices]
-        return x, indices
-
-    _, indices = torch.topk(-d_norm, k = config.TOP_K, dim=1)
-    row_indices = torch.arange(indices.size(0), device=indices.device).unsqueeze(1).expand(-1, config.TOP_K)
-    row_indices = row_indices.reshape(-1, 1)
-    column_indices = indices.reshape(-1, 1)
-    indices = torch.cat([row_indices, column_indices], dim=1)
-    x = x[indices[:, 0], indices[:, 1], :]
-    x = x.reshape(n, config.TOP_K, c)
-    return x, indices
 
 def dynamics(s, a):
-    """
-    The ground robot dynamics in PyTorch.
-
+    """ The ground robot dynamics.
+    
     Args:
-        s (Tensor): The current state, shape (N, 4).
-        a (Tensor): The acceleration taken by each agent, shape (N, 2).
-
+        s (N, 4): The current state.
+        a (N, 2): The acceleration taken by each agent.
     Returns:
-        Tensor: The time derivative of s, shape (N, 4).
+        dsdt (N, 4): The time derivative of s.
     """
-    dsdt = torch.cat([s[:, 2:], a], dim=1)
+    dsdt = tf.concat([s[:, 2:], a], axis=1)
     return dsdt
 
 
-
-def loss_barrier(h, s, r, ttc, eps=[1e-3, 0]):
-    """
-    Build the loss function for the control barrier functions in PyTorch.
+def loss_barrier(h, s, r, ttc, indices=None, eps=[1e-3, 0]):
+    """ Build the loss function for the control barrier functions.
 
     Args:
-        h (Tensor): The control barrier function, shape (N, N, 1).
-        s (Tensor): The current state of N agents, shape (N, 4).
+        h (N, N, 1): The control barrier function.
+        s (N, 4): The current state of N agents.
         r (float): The radius of the safe regions.
         ttc (float): The threshold of time to collision.
-    
-    Returns:
-        Tuple[Tensor, Tensor, Tensor, Tensor]: The dangerous loss, safe loss, 
-        accuracy of dangerous conditions, and accuracy of safe conditions.
     """
-    h_reshape = h.view(-1)
-    dang_mask = ttc_dangerous_mask(s, r=r, ttc=ttc)  
-    dang_mask_reshape = dang_mask.view(-1)
-    safe_mask_reshape = ~dang_mask_reshape
 
-    dang_h = h_reshape[dang_mask_reshape]
-    safe_h = h_reshape[safe_mask_reshape]
+    h_reshape = tf.reshape(h, [-1])
+    dang_mask = ttc_dangerous_mask(s, r=r, ttc=ttc, indices=indices)
+    dang_mask_reshape = tf.reshape(dang_mask, [-1])
+    safe_mask_reshape = tf.logical_not(dang_mask_reshape)
 
-    num_dang = dang_h.size(0)
-    num_safe = safe_h.size(0)
+    dang_h = tf.boolean_mask(h_reshape, dang_mask_reshape)
+    safe_h = tf.boolean_mask(h_reshape, safe_mask_reshape)
 
-    loss_dang = torch.sum(torch.maximum(dang_h + eps[0], torch.tensor(0.))) / (1e-5 + num_dang)
-    loss_safe = torch.sum(torch.maximum(-safe_h + eps[1], torch.tensor(0.))) / (1e-5 + num_safe)
+    num_dang = tf.cast(tf.shape(dang_h)[0], tf.float32)
+    num_safe = tf.cast(tf.shape(safe_h)[0], tf.float32)
 
-    acc_dang = torch.sum((dang_h <= 0).float()) / (1e-5 + num_dang)
-    acc_safe = torch.sum((safe_h > 0).float()) / (1e-5 + num_safe)
+    loss_dang = tf.reduce_sum(
+        tf.math.maximum(dang_h + eps[0], 0)) / (1e-5 + num_dang)
+    loss_safe = tf.reduce_sum(
+        tf.math.maximum(-safe_h + eps[1], 0)) / (1e-5 + num_safe)
 
-    acc_dang = acc_dang if num_dang > 0 else torch.tensor(-1.0)
-    acc_safe = acc_safe if num_safe > 0 else torch.tensor(-1.0)
+    acc_dang = tf.reduce_sum(tf.cast(
+        tf.less_equal(dang_h, 0), tf.float32)) / (1e-5 + num_dang)
+    acc_safe = tf.reduce_sum(tf.cast(
+        tf.greater(safe_h, 0), tf.float32)) / (1e-5 + num_safe)
+
+    acc_dang = tf.cond(
+        tf.greater(num_dang, 0), lambda: acc_dang, lambda: -tf.constant(1.0))
+    acc_safe = tf.cond(
+        tf.greater(num_safe, 0), lambda: acc_safe, lambda: -tf.constant(1.0))
 
     return loss_dang, loss_safe, acc_dang, acc_safe
 
 
-def loss_derivatives(s, a, h, x, r, ttc, alpha, time_step, dist_min_thres, eps=[1e-3, 0]):
-    """
-    Calculate the loss based on derivatives of the control barrier function in PyTorch.
-
-    Args:
-        s (Tensor): The current state of N agents, shape (N, 4).
-        a (Tensor): The acceleration taken by each agent, shape (N, 2).
-        h (Tensor): The control barrier function, shape (N, N, 1).
-        x (Tensor): Input features for the network_cbf, possibly the relative positions.
-        r (float): The radius of the safe regions.
-        ttc (float): The threshold of time to collision.
-        alpha (float): Scaling factor for the derivative term.
-        time_step (float): Time step used for the derivative approximation.
-        dist_min_thres (float): Minimum distance threshold for considering agents.
-        eps (list): Epsilon values for loss calculations.
-
-    Returns:
-        Tuple[Tensor, Tensor, Tensor, Tensor]: The dangerous derivative loss, safe derivative loss,
-                                               accuracy of dangerous conditions, accuracy of safe conditions.
-    """
+def loss_derivatives(s, a, h, x, r, ttc, alpha, indices=None, eps=[1e-3, 0]):
     dsdt = dynamics(s, a)
-    s_next = s + dsdt * time_step
+    s_next = s + dsdt * config.TIME_STEP
 
-    cbf = NetworkCBF()
-    x_next = torch.unsqueeze(s_next,1) - torch.unsqueeze(s_next,0)
-    h_next, mask_next = cbf(x_next, config.DIST_MIN_THRES)  # Assuming adaptation to PyTorch
+    x_next = tf.expand_dims(s_next, 1) - tf.expand_dims(s_next, 0)
+    h_next, mask_next, _ = network_cbf(x=x_next, r=config.DIST_MIN_THRES, indices=indices)
 
-    deriv = h_next - h + time_step * alpha * h
+    deriv = h_next - h + config.TIME_STEP * alpha * h
 
-    deriv_reshape = deriv.view(-1)
-    dang_mask = ttc_dangerous_mask(s=s, r=r, ttc=ttc)  # Assuming adaptation to PyTorch
-    dang_mask_reshape = dang_mask.view(-1)
-    safe_mask_reshape = ~dang_mask_reshape
-    dang_deriv = deriv_reshape[dang_mask_reshape]
-    safe_deriv = deriv_reshape[safe_mask_reshape]
+    deriv_reshape = tf.reshape(deriv, [-1])
+    dang_mask = ttc_dangerous_mask(s=s, r=r, ttc=ttc, indices=indices)
+    dang_mask_reshape = tf.reshape(dang_mask, [-1])
+    safe_mask_reshape = tf.logical_not(dang_mask_reshape)
 
-    num_dang = dang_deriv.size(0)
-    num_safe = safe_deriv.size(0)
+    dang_deriv = tf.boolean_mask(deriv_reshape, dang_mask_reshape)
+    safe_deriv = tf.boolean_mask(deriv_reshape, safe_mask_reshape)
 
-    loss_dang_deriv = torch.sum(torch.maximum(-dang_deriv + eps[0], torch.tensor(0.))) / (1e-5 + num_dang)
-    loss_safe_deriv = torch.sum(torch.maximum(-safe_deriv + eps[1], torch.tensor(0.))) / (1e-5 + num_safe)
+    num_dang = tf.cast(tf.shape(dang_deriv)[0], tf.float32)
+    num_safe = tf.cast(tf.shape(safe_deriv)[0], tf.float32)
 
-    acc_dang_deriv = torch.sum((dang_deriv >= 0).float()) / (1e-5 + num_dang)
-    acc_safe_deriv = torch.sum((safe_deriv >= 0).float()) / (1e-5 + num_safe)
+    loss_dang_deriv = tf.reduce_sum(
+        tf.math.maximum(-dang_deriv + eps[0], 0)) / (1e-5 + num_dang)
+    loss_safe_deriv = tf.reduce_sum(
+        tf.math.maximum(-safe_deriv + eps[1], 0)) / (1e-5 + num_safe)
 
-    acc_dang_deriv = acc_dang_deriv if num_dang > 0 else torch.tensor(-1.0)
-    acc_safe_deriv = acc_safe_deriv if num_safe > 0 else torch.tensor(-1.0)
+    acc_dang_deriv = tf.reduce_sum(tf.cast(
+        tf.greater_equal(dang_deriv, 0), tf.float32)) / (1e-5 + num_dang)
+    acc_safe_deriv = tf.reduce_sum(tf.cast(
+        tf.greater_equal(safe_deriv, 0), tf.float32)) / (1e-5 + num_safe)
+
+    acc_dang_deriv = tf.cond(
+        tf.greater(num_dang, 0), lambda: acc_dang_deriv, lambda: -tf.constant(1.0))
+    acc_safe_deriv = tf.cond(
+        tf.greater(num_safe, 0), lambda: acc_safe_deriv, lambda: -tf.constant(1.0))
 
     return loss_dang_deriv, loss_safe_deriv, acc_dang_deriv, acc_safe_deriv
 
+
 def loss_actions(s, g, a, r, ttc):
-    """
-    Calculate action loss in PyTorch.
-
-    Args:
-        s (Tensor): The current state of N agents, shape (N, 4).
-        g (Tensor): The goal state of N agents, shape (N, 2).
-        a (Tensor): The action taken by each agent, shape (N, 2).
-        r (float): The radius of the safe regions. (Not used in this function, but kept for consistency)
-        ttc (float): The threshold of time to collision. (Not used in this function, but kept for consistency)
-
-    Returns:
-        Tensor: The mean of the absolute difference in norms between the reference and actual actions.
-    """
-    # Create the state_gain matrix in PyTorch
-    state_gain = -torch.tensor(
-        np.eye(2, 4) + np.eye(2, 4, k=2) * np.sqrt(3), dtype=torch.float32)
-
-    # Concatenate the relative positions and velocities
-    s_ref = torch.cat([s[:, :2] - g, s[:, 2:]], dim=1)
-    
-    # Matrix multiplication in PyTorch
-    action_ref = torch.matmul(s_ref, state_gain.T)  # Transpose state_gain for correct dimensionality
-    
-    # Calculate the norms of the reference actions and the actual actions
-    action_ref_norm = torch.sum(action_ref ** 2, dim=1)
-    action_net_norm = torch.sum(a ** 2, dim=1)
-    
-    # Calculate the absolute difference in norms and then the mean loss
-    norm_diff = torch.abs(action_net_norm - action_ref_norm)
-    loss = torch.mean(norm_diff)
-
+    state_gain = -tf.constant(
+        np.eye(2, 4) + np.eye(2, 4, k=2) * np.sqrt(3), dtype=tf.float32)
+    s_ref = tf.concat([s[:, :2] - g, s[:, 2:]], axis=1)
+    action_ref = tf.linalg.matmul(s_ref, state_gain, False, True)
+    action_ref_norm = tf.reduce_sum(tf.square(action_ref), axis=1)
+    action_net_norm = tf.reduce_sum(tf.square(a), axis=1)
+    norm_diff = tf.abs(action_net_norm - action_ref_norm)
+    loss = tf.reduce_mean(norm_diff)
     return loss
 
 
-def statics(s, a, h, alpha, time_step, dist_min_thres):
-    
-    dsdt = dynamics(s, a)  # Assuming adaptation to PyTorch
-    s_next = s + dsdt * time_step
+def statics(s, a, h, alpha, indices=None):
+    dsdt = dynamics(s, a)
+    s_next = s + dsdt * config.TIME_STEP
 
-    x_next = torch.unsqueeze(s_next, 1) - torch.unsqueeze(s_next, 0)
-    h_next, mask_next, _ = NetworkCBF(x=x_next, r=dist_min_thres)  # Assuming adaptation to PyTorch
+    x_next = tf.expand_dims(s_next, 1) - tf.expand_dims(s_next, 0)
+    h_next, mask_next, _ = network_cbf(x=x_next, r=config.DIST_MIN_THRES, indices=indices)
 
-    deriv = h_next - h + time_step * alpha * h
+    deriv = h_next - h + config.TIME_STEP * alpha * h
 
-    mean_deriv = torch.mean(deriv)
-    std_deriv = torch.sqrt(torch.mean((deriv - mean_deriv) ** 2))
-    prob_neg = torch.mean((deriv < 0).float())
+    mean_deriv = tf.reduce_mean(deriv)
+    std_deriv = tf.sqrt(tf.reduce_mean(tf.square(deriv - mean_deriv)))
+    prob_neg = tf.reduce_mean(tf.cast(tf.less(deriv, 0), tf.float32))
 
     return mean_deriv, std_deriv, prob_neg
 
 
-def ttc_dangerous_mask(s, r, ttc):
-    """
-    Calculate a mask identifying dangerous situations based on time-to-collision (TTC) in PyTorch.
-
-    Args:
-        s (Tensor): The current state of N agents, shape (N, 4), where each row is [x, y, vx, vy].
-        r (float): The radius of the safe regions.
-        ttc (float): The threshold of time to collision.
-        top_k (int): The top K nearest agents to consider for collision checking.
-
-    Returns:
-        Tensor: A boolean tensor indicating dangerous situations, shape (N, N, 1).
-    """
-    # Assuming remove_distant_agents is adapted to PyTorch and returns appropriate tensors
-    s_diff = torch.unsqueeze(s, 1) - torch.unsqueeze(s, 0)
-    s_diff = torch.cat([s_diff, torch.unsqueeze(torch.eye(s.size(0), device=s.device), 2)], dim=2)
-    s_diff, _ = remove_distant_agents(s_diff)  # Placeholder for actual implementation
-    
-    x, y, vx, vy, eye = torch.split(s_diff, [1, 1, 1, 1, 1], dim=2)
+def ttc_dangerous_mask(s, r, ttc, indices=None):
+    s_diff = tf.expand_dims(s, 1) - tf.expand_dims(s, 0)
+    s_diff = tf.concat(
+        [s_diff, tf.expand_dims(tf.eye(tf.shape(s)[0]), 2)], axis=2)
+    s_diff, _ = remove_distant_agents(s_diff, config.TOP_K, indices)
+    x, y, vx, vy, eye = tf.split(s_diff, 5, axis=2)
     x = x + eye
     y = y + eye
     alpha = vx ** 2 + vy ** 2
     beta = 2 * (x * vx + y * vy)
     gamma = x ** 2 + y ** 2 - r ** 2
-    dist_dangerous = gamma < 0
+    dist_dangerous = tf.less(gamma, 0)
 
-    has_two_positive_roots = ((beta ** 2 - 4 * alpha * gamma) > 0) & (gamma > 0) & (beta < 0)
-    root_less_than_ttc = ((-beta - 2 * alpha * ttc) < 0) | (((beta + 2 * alpha * ttc) ** 2) < (beta ** 2 - 4 * alpha * gamma))
-    has_root_less_than_ttc = has_two_positive_roots & root_less_than_ttc
-    ttc_dangerous = dist_dangerous | has_root_less_than_ttc
+    has_two_positive_roots = tf.logical_and(
+        tf.greater(beta ** 2 - 4 * alpha * gamma, 0),
+        tf.logical_and(tf.greater(gamma, 0), tf.less(beta, 0)))
+    root_less_than_ttc = tf.logical_or(
+        tf.less(-beta - 2 * alpha * ttc, 0),
+        tf.less((beta + 2 * alpha * ttc) ** 2, beta ** 2 - 4 * alpha * gamma))
+    has_root_less_than_ttc = tf.logical_and(has_two_positive_roots, root_less_than_ttc)
+    ttc_dangerous = tf.logical_or(dist_dangerous, has_root_less_than_ttc)
 
-    return ttc_dangerous.unsqueeze(-1)  # Adding the last dimension to match TensorFlow's shape
+    return ttc_dangerous
 
 
 def ttc_dangerous_mask_np(s, r, ttc):
@@ -406,3 +323,20 @@ def ttc_dangerous_mask_np(s, r, ttc):
 
     return ttc_dangerous
 
+
+def remove_distant_agents(x, k, indices=None):
+    n, _, c = x.get_shape().as_list()
+    if n <= k:
+        return x, False
+    d_norm = tf.sqrt(tf.reduce_sum(tf.square(x[:, :, :2]) + 1e-6, axis=2))
+    if indices is not None:
+        x = tf.reshape(tf.gather_nd(x, indices), [n, k, c])
+        return x, indices
+    _, indices = tf.nn.top_k(-d_norm, k=k)
+    row_indices = tf.expand_dims(
+        tf.range(tf.shape(indices)[0]), 1) * tf.ones_like(indices)
+    row_indices = tf.reshape(row_indices, [-1, 1])
+    column_indices = tf.reshape(indices, [-1, 1])
+    indices = tf.concat([row_indices, column_indices], axis=1)
+    x = tf.reshape(tf.gather_nd(x, indices), [n, k, c])
+    return x, indices
