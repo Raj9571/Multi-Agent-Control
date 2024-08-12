@@ -148,7 +148,7 @@ def main():
     if args.gpu and torch.cuda.is_available():
         torch.cuda.set_device(int(args.gpu))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    device = torch.device("cpu")
+    #device = torch.device("cpu")
     model_cbf = core.NetworkCBF().to(device)
     model_action = core.NetworkAction().to(device)
     
