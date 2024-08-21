@@ -77,76 +77,71 @@ def generate_data(num_agents, dist_min_thres):
 class NetworkCBF(nn.Module):
     def __init__(self):
         super(NetworkCBF, self).__init__()
-        obs_radius = config.OBS_RADIUS
-        self.obs_radius = obs_radius
+        self.obs_radius = config.OBS_RADIUS
+        
         # Adjust in_channels to match the dimension after concatenation
         self.conv1 = nn.Conv1d(in_channels=6, out_channels=64, kernel_size=1)
         self.conv2 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=1)
         self.conv3 = nn.Conv1d(in_channels=128, out_channels=64, kernel_size=1)
         self.conv4 = nn.Conv1d(in_channels=64, out_channels=1, kernel_size=1)
 
-    
-    def forward(self, x, r):
+    def forward(self, x, r, indices=None):
         # Calculate norm
         d_norm = torch.sqrt(torch.sum(torch.square(x[:, :, :2]) + 1e-4, dim=2))
-        # Identity matrix for self identification
-        eye = torch.eye(x.shape[0], device=x.device).unsqueeze(-1)  # Ensure correct dimension
-        # Concatenate additional features
         
+        # Identity matrix for self-identification
+        eye = torch.eye(x.shape[0], device=x.device).unsqueeze(-1)  # Ensure correct dimension
+        
+        # Concatenate additional features
         x = torch.cat([x, eye, (d_norm.unsqueeze(-1) - r)], dim=-1)
         
-        x, _ = remove_distant_agents(x) #if needed
+        # Optionally remove distant agents
+        x, indices = remove_distant_agents(x, indices=indices)
         
         # Ensure the distance calculation and masking logic align with your new tensor shape
         dist = torch.sqrt(torch.sum(x[..., :2]**2 + 1e-4, dim=-1, keepdim=True))
         mask = (dist <= self.obs_radius).float()
         
         # Pass through convolutional layers
-        
-        x = F.relu(self.conv1(x.permute(0,2,1)))
-        
+        x = F.relu(self.conv1(x.permute(0, 2, 1)))
         x = F.relu(self.conv2(x))
         x = F.relu(self.conv3(x))
         x = self.conv4(x)
         
         # Apply mask
-        x = x.permute(0,2,1) * mask
-        return x, mask
+        x = x.permute(0, 2, 1) * mask
+        
+        return x, mask, indices
 
 #class of action
 class NetworkAction(nn.Module):
     def __init__(self):
         super(NetworkAction, self).__init__()
-        self.top_k = config.TOP_K
-        self.obs_radius = config.OBS_RADIUS
-        # Convolutional layers
         self.conv1 = nn.Conv1d(in_channels=5, out_channels=64, kernel_size=1)
         self.conv2 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=1)
-        # Fully connected layers
         self.fc1 = nn.Linear(in_features=132, out_features=64)
         self.fc2 = nn.Linear(in_features=64, out_features=128)
         self.fc3 = nn.Linear(in_features=128, out_features=64)
         self.fc4 = nn.Linear(in_features=64, out_features=4)
 
-    def forward(self, s, g):
-        batch_size, seq_len = s.shape
-
-        #eye = torch.eye(seq_len, device=s.device).expand(batch_size, -1, -1).unsqueeze(1)
-        x = torch.unsqueeze(s, 1) - torch.unsqueeze(s, 0)  # NxNx4
-        eye = torch.eye(x.size(0)).unsqueeze(2)  # Shape: (batch_size, batch_size, 1)
-
-        # Concatenate along the last dimension
-        x = torch.cat([x, eye], dim=2)
-    
-        # Filter out distant agents and adjust input for convolution layers
-        x, _ = remove_distant_agents(x)
-        #x = x.transpose(1, 2)  # BxCxN
+    def forward(self, s, g, obs_radius=1.0, indices=None):
+        # Compute pairwise differences between all agents
+        x = s.unsqueeze(1) - s.unsqueeze(0)  # Shape: [num_agents, num_agents, 4]
+        x = torch.cat([x, torch.eye(x.size(0)).unsqueeze(2).to(s.device)], dim=2)  # Add identity matrix
         
-        # Apply convolution layers
-        x = F.relu(self.conv1(x.permute(0,2,1)))
+        # Filter out distant agents and adjust input for convolution layers
+        x, _ = remove_distant_agents(x, indices=indices)
+        
+        # Compute distances and apply mask
+        dist = torch.norm(x[:, :, :2], dim=2, keepdim=True)
+        mask = (dist < obs_radius).float()
+        
+        # Apply convolutional layers
+        x = F.relu(self.conv1(x.permute(0, 2, 1)))  # Change shape to [batch_size, channels, num_agents]
         x = F.relu(self.conv2(x))
-        # Apply global max pooling
-        x, _ = torch.max(x, dim=2)
+        
+        # Apply masked global max pooling
+        x = torch.max(x * mask.permute(0, 2, 1), dim=2)[0]
         
         # Combine with goal and current velocity information
         x = torch.cat([x, s[:, :2] - g, s[:, 2:]], dim=1)
@@ -157,24 +152,19 @@ class NetworkAction(nn.Module):
         x = F.relu(self.fc3(x))
         x = self.fc4(x)
         
-        x = 2.0 * torch.sigmoid(x) - 1.0
-        k_1, k_2, k_3, k_4 = torch.split(x, x.size(1) // 4, dim=1)
-
-        # Create a tensor of zeros with the same shape as k_1
+        # Apply sigmoid activation and rescale
+        x = 2.0 * torch.sigmoid(x) + 0.2
+        
+        # Split the output and compute gains
+        k_1, k_2, k_3, k_4 = torch.split(x, 1, dim=1)
         zeros = torch.zeros_like(k_1)
-
-        # Concatenate tensors along axis 1 to create gain_x and gain_y
         gain_x = -torch.cat([k_1, zeros, k_2, zeros], dim=1)
         gain_y = -torch.cat([zeros, k_3, zeros, k_4], dim=1)
-
-        # Concatenate tensors along axis 1 to create the state tensor
+        
+        # Compute the action
         state = torch.cat([s[:, :2] - g, s[:, 2:]], dim=1)
-
-        # Sum along axis 1 and keep the dimensions for a_x and a_y
         a_x = torch.sum(state * gain_x, dim=1, keepdim=True)
         a_y = torch.sum(state * gain_y, dim=1, keepdim=True)
-
-        # Concatenate a_x and a_y along axis 1 to get the final tensor `a`
         a = torch.cat([a_x, a_y], dim=1)
 
         return a
@@ -275,7 +265,7 @@ def loss_derivatives(s, a, h, x, r, ttc, alpha, time_step, dist_min_thres, eps=[
 
     cbf = NetworkCBF()
     x_next = torch.unsqueeze(s_next,1) - torch.unsqueeze(s_next,0)
-    h_next, mask_next = cbf(x_next, config.DIST_MIN_THRES)  # Assuming adaptation to PyTorch
+    h_next, mask_next,_ = cbf(x_next, config.DIST_MIN_THRES)  # Assuming adaptation to PyTorch
 
     deriv = h_next - h + time_step * alpha * h
 

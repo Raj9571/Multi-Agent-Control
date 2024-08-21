@@ -22,7 +22,7 @@ def get_next(s, g, a, model_cbf):
     x = s.unsqueeze(1) - s.unsqueeze(0)
     # h is the CBF value of shape [num_agents, TOP_K, 1], where TOP_K represents
     # the K nearest agents
-    h, mask = model_cbf(x=x, r=config.DIST_MIN_THRES)
+    h, mask,_ = model_cbf(x=x, r=config.DIST_MIN_THRES)
     # a_res is delta a. when a does not satisfy the CBF conditions, we want to compute
     # a a_res such that a + a_res satisfies the CBF conditions
     a_res = torch.zeros_like(a, requires_grad=True)
@@ -34,7 +34,7 @@ def get_next(s, g, a, model_cbf):
         dsdt = core.dynamics(s, a + a_res)
         s_next = s + dsdt * config.TIME_STEP
         x_next = s_next.unsqueeze(1) - s_next.unsqueeze(0)
-        h_next, mask_next = model_cbf(
+        h_next, mask_next,_ = model_cbf(
             x=x_next, r=config.DIST_MIN_THRES)
         # deriv should be >= 0. if not, we update a_res by gradient descent
         deriv = h_next - h + config.TIME_STEP * config.ALPHA_CBF * h
@@ -68,7 +68,7 @@ def get_next(s, g, a, model_cbf):
     dsdt = core.dynamics(s, a_opt)
     s_next = s + dsdt * config.TIME_STEP
     x_next = s_next.unsqueeze(1) - s_next.unsqueeze(0)
-    h_next, mask_next = model_cbf(x=x_next, r=config.DIST_MIN_THRES)
+    h_next, mask_next,_ = model_cbf(x=x_next, r=config.DIST_MIN_THRES)
     
     return h_next, s_next, a_opt, x_next
 
@@ -89,7 +89,7 @@ def main():
     model_cbf_eval = core.NetworkCBF()
     model_action_eval = core.NetworkAction()
 
-    checkpoint = torch.load("C:/Users/athar/OneDrive/Desktop/Unrelated/macbf-main/attempt 3/Safety-certificate-main/PyTorch/models/model_epoch_0.pth")
+    checkpoint = torch.load("/Users/rajjangir/Documents/Traffic Network project/conversion/Multi-Agent-Control-main/PyTorch/models/model_epoch_100.pth")
     model_cbf_eval.load_state_dict(checkpoint['model_cbf_state_dict'])
     model_action_eval.load_state_dict(checkpoint['model_action_state_dict'])
     
@@ -180,7 +180,8 @@ def main():
                     s_ref = np.concatenate([s_np[:, :2].detach().numpy() - g_np.cpu().numpy(), s_np[:, 2:].detach().numpy()], axis=1)
                     a_lqr = -s_ref.dot(K.T)
                     s_np = s_np + torch.tensor(np.concatenate(
-                        [s_np[:, 2:], a_lqr], axis=1), dtype=torch.float32).to(device) * config.TIME_STEP
+                       [s_np[:, 2:].detach().cpu().numpy(), a_lqr], axis=1), dtype=torch.float32).to(device) * config.TIME_STEP
+
             else:
                 if np.mean(
                     np.linalg.norm(s_np[:, :2].detach().numpy() - g_np.cpu().numpy(), axis=1)
